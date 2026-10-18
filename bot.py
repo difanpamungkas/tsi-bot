@@ -12,8 +12,17 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Token Bot Telegram Baru
 TOKEN = "8839466878:AAGDgqk3bcKkjo4FCg4RV28qLgFXv3zTwyk"
 BASE_URL = "https://tsiraw.tsindustri.com"
+
+SLOC_KEYWORDS = ['GFGD', 'GFGL', 'PROD', 'DALAM', 'LUAR', 'PRODUKSI']
+
+def is_sloc_name(val: str) -> bool:
+    if not val:
+        return False
+    clean = val.upper().strip()
+    return any(k in clean for k in SLOC_KEYWORDS)
 
 def normalize_sloc(val: str) -> str:
     if not val:
@@ -53,7 +62,6 @@ async def process_tsi(roll_data: str) -> str:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
         try:
-            # 1. Buka halaman utama untuk pembentukan session & cookies
             await page.goto(f"{BASE_URL}/brctsloc", wait_until="networkidle")
 
             for line in lines:
@@ -62,52 +70,55 @@ async def process_tsi(roll_data: str) -> str:
                     continue
 
                 batch_code = parts[0].upper()
-                target_sloc_input = parts[1] if len(parts) > 1 else None
-                target_bin_input = parts[2] if len(parts) > 2 else ""
+                
+                sender_sloc = None
+                receiver_sloc = None
+                clean_bin = ""
 
-                # 2. Cek stok awal via API
-                stock_res = await page.request.post(
-                    f"{BASE_URL}/rstock/get_stock",
-                    form={
-                        "mat": "",
-                        "sloc": "",
-                        "batch": batch_code,
-                        "cust": "",
-                        "refr": "",
-                        "shift": ""
-                    },
-                    headers={"X-Requested-With": "XMLHttpRequest"}
-                )
-
-                current_sloc = "GFGD"
-                clean_bin = target_bin_input.upper()
-
-                if stock_res.ok:
-                    try:
-                        stock_json = await stock_res.json()
-                        if isinstance(stock_json, list) and len(stock_json) > 0:
-                            item = stock_json[0]
-                            current_sloc = item.get("SLOC", "GFGD")
-                            if not clean_bin:
-                                clean_bin = str(item.get("CODE_BIN") or item.get("BIN") or "").strip().upper()
-                                if clean_bin in ["NONE", "NULL", "NAN", "-"]:
-                                    clean_bin = ""
-                    except Exception:
-                        pass
-
-                sender_sloc = normalize_sloc(current_sloc)
-
-                # 3. Tentukan Sloc Receiver (Target)
-                if target_sloc_input:
-                    receiver_sloc = normalize_sloc(target_sloc_input)
-                else:
-                    # Auto Swap (Dalam <-> Luar)
-                    if sender_sloc == "GFGD":
-                        receiver_sloc = "GFGL"
-                    elif sender_sloc == "GFGL":
-                        receiver_sloc = "GFGD"
+                if len(parts) >= 4:
+                    sender_sloc = normalize_sloc(parts[1])
+                    receiver_sloc = normalize_sloc(parts[2])
+                    clean_bin = parts[3].upper()
+                elif len(parts) == 3:
+                    if is_sloc_name(parts[1]) and is_sloc_name(parts[2]):
+                        sender_sloc = normalize_sloc(parts[1])
+                        receiver_sloc = normalize_sloc(parts[2])
                     else:
-                        receiver_sloc = "GFGD"
+                        receiver_sloc = normalize_sloc(parts[1])
+                        clean_bin = parts[2].upper()
+                elif len(parts) == 2:
+                    receiver_sloc = normalize_sloc(parts[1])
+
+                if not sender_sloc:
+                    current_sloc = "GFGD"
+                    stock_res = await page.request.post(
+                        f"{BASE_URL}/rstock/get_stock",
+                        form={
+                            "mat": "",
+                            "sloc": "",
+                            "batch": batch_code,
+                            "cust": "",
+                            "refr": "",
+                            "shift": ""
+                        },
+                        headers={"X-Requested-With": "XMLHttpRequest"}
+                    )
+                    if stock_res.ok:
+                        try:
+                            stock_json = await stock_res.json()
+                            if isinstance(stock_json, list) and len(stock_json) > 0:
+                                item = stock_json[0]
+                                current_sloc = item.get("SLOC", "GFGD")
+                                if not clean_bin:
+                                    b_val = str(item.get("CODE_BIN") or item.get("BIN") or "").strip()
+                                    if b_val.upper() not in ["NONE", "NULL", "NAN", "-", ""]:
+                                        clean_bin = b_val.upper()
+                        except Exception:
+                            pass
+                    sender_sloc = normalize_sloc(current_sloc)
+
+                if not receiver_sloc:
+                    receiver_sloc = "GFGL" if sender_sloc == "GFGD" else "GFGD"
 
                 post_payload = {
                     "batch": batch_code,
@@ -123,14 +134,12 @@ async def process_tsi(roll_data: str) -> str:
                     "X-Requested-With": "XMLHttpRequest"
                 }
 
-                # 4. Eksekusi API Save Scan
-                scan_res = await page.request.post(
+                await page.request.post(
                     f"{BASE_URL}/ttranslist/save_scan",
                     form=post_payload,
                     headers=headers
                 )
 
-                # 5. Eksekusi API Save Post
                 post_res = await page.request.post(
                     f"{BASE_URL}/ttranslist/save_post",
                     form=post_payload,
@@ -138,29 +147,38 @@ async def process_tsi(roll_data: str) -> str:
                 )
 
                 if post_res.ok:
-                    results.append(f"✅ `{batch_code}`: {sender_sloc} ➔ {receiver_sloc}")
+                    try:
+                        res_json = await post_res.json()
+                        msg = str(res_json.get("message", "")).lower()
+                        if "berhasil" in msg or "ok" in msg or res_json.get("status") is True:
+                            bin_info = f" (Bin: `{clean_bin}`)" if clean_bin else ""
+                            results.append(f"✅ `{batch_code}`: {sender_sloc} ➔ {receiver_sloc}{bin_info}")
+                        else:
+                            err_msg = res_json.get("message") or "Ditolak server TSI"
+                            results.append(f"❌ `{batch_code}`: {err_msg}")
+                    except Exception:
+                        results.append(f"✅ `{batch_code}`: {sender_sloc} ➔ {receiver_sloc}")
                 else:
-                    results.append(f"❌ `{batch_code}`: Gagal Posting")
+                    results.append(f"❌ `{batch_code}`: HTTP Error {post_res.status}")
 
                 await asyncio.sleep(0.5)
 
             await browser.close()
-            
-            summary = "\n".join(results)
-            return f"📊 **Hasil Pemindahan Sloc:**\n\n{summary}"
+            return "📊 **Hasil Pemindahan Sloc:**\n\n" + "\n".join(results)
 
         except Exception as e:
             await browser.close()
-            return f"❌ Terjadi kesalahan saat memproses di VPS: {str(e)}"
+            return f"❌ Terjadi kesalahan di VPS: {str(e)}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 **Bot TSI Raw Workstation Active!**\n\n"
-        "Kirim daftar roll untuk langsung dipindahkan Sloc-nya.\n\n"
+        "Kirim daftar roll untuk memindahkan Sloc.\n\n"
         "**Format Pesan:**\n"
-        "`KODE_ROLL` (Auto Swap Sloc)\n"
-        "`KODE_ROLL, TARGET_SLOC` (Contoh: `GI123, GFGL`)\n"
-        "`KODE_ROLL, TARGET_SLOC, TARGET_BIN` (Contoh: `GI123, GFGL, A01-02`)"
+        "• `KODE_ROLL` (Auto Swap Sloc)\n"
+        "• `KODE_ROLL, TARGET_SLOC` (Contoh: `GI123, GFGL`)\n"
+        "• `KODE_ROLL, SLOC_ASAL, SLOC_TUJUAN` (Contoh: `GI123, GFGL, GFGD`)\n"
+        "• `KODE_ROLL, SLOC_ASAL, SLOC_TUJUAN, BIN` (Contoh: `GI123, GFGL, GFGD, A01-02`)"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
