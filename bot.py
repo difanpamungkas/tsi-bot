@@ -1,8 +1,24 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+# ==========================================
+# SERVER DUMMY UNTUK RENDER WEB SERVICE FREE
+# ==========================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot TSI Raw Active!")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
 # ==========================================
 # KONFIGURASI BOT & TSI RAW
@@ -99,6 +115,9 @@ async def execute_transfers(update: Update, lines: list):
     await status_msg.edit_text(final_report, parse_mode="Markdown")
 
 if __name__ == "__main__":
+    # Jalankan server dummy di latar belakang untuk Render Free Tier
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_text_data))
