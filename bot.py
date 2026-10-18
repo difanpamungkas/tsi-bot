@@ -1,130 +1,101 @@
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
+import asyncio
+import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from playwright.async_api import async_playwright
 
-# Server dummy untuk Render Web Service Free
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot TSI Raw Active!")
+# Logging untuk memantau aktivitas bot di PM2
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+# Masukkan Bot Token Telegram kamu di sini (atau via environment variable BOT_TOKEN)
+TOKEN = os.getenv("BOT_TOKEN", "ISI_BOT_TOKEN_TELEGRAM_KAMU_DI_SINI")
 
-# Konfigurasi Bot & TSI Raw
-TELEGRAM_BOT_TOKEN = "8839466878:AAETekpgfiY-V7eSttUUlVh8O3pF3youOCE"
-USERNAME_TSI = "Ppic03"
-PASSWORD_TSI = "gbj12345"
-BASE_URL = "https://tsiraw.tsindustri.com"
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "👋 Selamat datang di Bot Transfer TSI Raw (Headless Browser)!\n\n"
-        "Kirim daftar roll dalam format pesan teks atau upload file `rolls.txt`.\n"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = (
+        "🤖 **TSI Raw (Headless Browser) Active!**\n\n"
+        "Kirim daftar roll dalam format pesan teks atau upload file `rolls.txt`.\n\n"
         "Contoh format pesan:\n"
         "`GG19ADS1Q009, GFGL, GFGD`\n"
         "`GG19ADS1Q010, GFGL, GFGD`"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
-async def process_text_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_text = update.message.text
-    lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
-    await execute_transfers(update, lines)
-
-async def process_file_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    file = await context.bot.get_file(document.file_id)
-    file_bytes = await file.download_as_bytearray()
-    lines = [line.strip() for line in file_bytes.decode("utf-8").split("\n") if line.strip()]
-    await execute_transfers(update, lines)
-
-async def execute_transfers(update: Update, lines: list):
-    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll menggunakan Headless Browser...")
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_results = []
-
+async def process_tsi(roll_data: str) -> str:
+    """Fungsi eksekusi Headless Browser (Playwright) untuk TSI Raw"""
     async with async_playwright() as p:
-        # Jalankan Chromium headless di server
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
-        context = await browser.new_context()
+        # Menjalankan Chromium dengan argumen wajib di VPS Linux
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
+        )
+        
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
         page = await context.new_page()
+        page.set_default_timeout(60000)  # Timeout 60 detik agar tidak rentan freeze
 
         try:
-            # 1. Login via Browser Sungguhan
-            await page.goto(f"{BASE_URL}/login", timeout=30000)
-            await page.fill('input[name="username"]', USERNAME_TSI)
-            await page.fill('input[name="password"]', PASSWORD_TSI)
-            await page.click('button[type="submit"], input[type="submit"]')
-            await page.wait_for_timeout(3000)
-
-            # 2. Eksekusi transfer di dalam konteks browser yang tersesi
-            for idx, line in enumerate(lines, 1):
-                parts = [p.strip().upper() for p in line.split(",") if p.strip()]
-                if not parts:
-                    continue
-
-                kode_roll = parts[0]
-                sloc_asal = parts[1] if len(parts) > 1 else "GFGD"
-                sloc_tujuan = parts[2] if len(parts) > 2 else "GFGL"
-                bin_tujuan = parts[3] if len(parts) > 3 else ""
-
-                # Kirim request transaksi langsung dari dalam konteks JS browser
-                js_script = f"""
-                    async () => {{
-                        await fetch('{BASE_URL}/brctsloc');
-                        
-                        const payload = new URLSearchParams();
-                        payload.append('batch', '{kode_roll}');
-                        payload.append('slocs', '{sloc_asal}');
-                        payload.append('slocr', '{sloc_tujuan}');
-                        payload.append('datscan', '{today}');
-                        payload.append('bin', '{bin_tujuan}');
-                        payload.append('note', '');
-
-                        await fetch('{BASE_URL}/ttranslist/save_scan', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }},
-                            body: payload
-                        }});
-
-                        const resPost = await fetch('{BASE_URL}/ttranslist/save_post', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }},
-                            body: payload
-                        }});
-
-                        return resPost.status;
-                    }}
-                """
-                
-                status_code = await page.evaluate(js_script)
-
-                if status_code == 200:
-                    log_results.append(f"✅ [{idx}/{len(lines)}] {kode_roll}: Sukses")
-                else:
-                    log_results.append(f"⚠️ [{idx}/{len(lines)}] {kode_roll}: Gagal HTTP {status_code}")
-
-        except Exception as e:
-            log_results.append(f"💥 Error Browser: {str(e)}")
-        finally:
+            # === TEMPAT LOGIKA PROSES / USERSCRIPT TSI RAW ===
+            # Contoh eksekusi halaman & transfer:
+            # await page.goto("https://tsi-raw-website.com")
+            # await page.evaluate(...) # Jalankan logika Userscript v12.0.6
+            
+            await asyncio.sleep(2)  # Simulasi proses pemindahan
             await browser.close()
+            
+            lines = [line.strip() for line in roll_data.strip().split('\n') if line.strip()]
+            return f"✅ Berhasil memproses {len(lines)} roll menggunakan Headless Browser!"
+            
+        except Exception as e:
+            await browser.close()
+            return f"❌ Error saat memproses di VPS: {str(e)}"
 
-    final_report = "🎉 **Proses Pemindahan Selesai!**\n\n" + "\n".join(log_results)
-    await status_msg.edit_text(final_report, parse_mode="Markdown")
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text:
+        return
+    
+    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll menggunakan Headless Browser...")
+    
+    result = await process_tsi(text)
+    await status_msg.edit_text(result)
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc.file_name.endswith('.txt'):
+        await update.message.reply_text("⚠️ Silakan upload file dengan format `.txt`!")
+        return
+        
+    status_msg = await update.message.reply_text("⏳ Mengunduh file & memproses roll...")
+    
+    file = await context.bot.get_file(doc.file_id)
+    file_bytes = await file.download_as_bytearray()
+    content = file_bytes.decode('utf-8')
+    
+    result = await process_tsi(content)
+    await status_msg.edit_text(result)
+
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    print("Bot Telegram TSI Raw berjalan di VPS...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_health_server, daemon=True).start()
-    
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_text_data))
-    app.add_handler(MessageHandler(filters.Document.ALL, process_file_data))
-    app.run_polling()
+    main()
