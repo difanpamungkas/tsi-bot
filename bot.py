@@ -1,14 +1,12 @@
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from playwright.async_api import async_playwright
 
-# ==========================================
-# SERVER DUMMY UNTUK RENDER WEB SERVICE FREE
-# ==========================================
+# Server dummy untuk Render Web Service Free
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,34 +18,15 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# ==========================================
-# KONFIGURASI BOT & TSI RAW
-# ==========================================
+# Konfigurasi Bot & TSI Raw
 TELEGRAM_BOT_TOKEN = "8839466878:AAETekpgfiY-V7eSttUUlVh8O3pF3youOCE"
-
-BASE_URL = "https://tsiraw.tsindustri.com"
-URL_LOGIN = f"{BASE_URL}/login/process"
-URL_SESSION_INIT = f"{BASE_URL}/brctsloc"
-URL_SAVE_SCAN = f"{BASE_URL}/ttranslist/save_scan"
-URL_SAVE_POST = f"{BASE_URL}/ttranslist/save_post"
-
 USERNAME_TSI = "Ppic03"
 PASSWORD_TSI = "gbj12345"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
-    "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-}
-
-def do_tsi_login(session):
-    payload = {"username": USERNAME_TSI, "password": PASSWORD_TSI}
-    res = session.post(URL_LOGIN, data=payload, timeout=10)
-    return res.status_code == 200
+BASE_URL = "https://tsiraw.tsindustri.com"
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "👋 Selamat datang di Bot Transfer TSI Raw!\n\n"
+        "👋 Selamat datang di Bot Transfer TSI Raw (Headless Browser)!\n\n"
         "Kirim daftar roll dalam format pesan teks atau upload file `rolls.txt`.\n"
         "Contoh format pesan:\n"
         "`GG19ADS1Q009, GFGL, GFGD`\n"
@@ -68,54 +47,80 @@ async def process_file_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await execute_transfers(update, lines)
 
 async def execute_transfers(update: Update, lines: list):
-    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll...")
-    
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    
-    if not do_tsi_login(session):
-        await status_msg.edit_text("❌ Gagal login ke server TSI Raw. Periksa akun!")
-        return
-
+    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll menggunakan Headless Browser...")
     today = datetime.now().strftime("%Y-%m-%d")
     log_results = []
 
-    for idx, line in enumerate(lines, 1):
-        parts = [p.strip().upper() for p in line.split(",") if p.strip()]
-        if not parts:
-            continue
-
-        kode_roll = parts[0]
-        sloc_asal = parts[1] if len(parts) > 1 else "GFGD"
-        sloc_tujuan = parts[2] if len(parts) > 2 else "GFGL"
-        bin_tujuan = parts[3] if len(parts) > 3 else ""
-
-        payload = {
-            "batch": kode_roll,
-            "slocs": sloc_asal,
-            "slocr": sloc_tujuan,
-            "datscan": today,
-            "bin": bin_tujuan,
-            "note": ""
-        }
+    async with async_playwright() as p:
+        # Jalankan Chromium headless di server
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+        context = await browser.new_context()
+        page = await context.new_page()
 
         try:
-            session.get(URL_SESSION_INIT, timeout=8)
-            session.post(URL_SAVE_SCAN, data=payload, timeout=8)
-            res = session.post(URL_SAVE_POST, data=payload, timeout=8)
+            # 1. Login via Browser Sungguhan
+            await page.goto(f"{BASE_URL}/login", timeout=30000)
+            await page.fill('input[name="username"]', USERNAME_TSI)
+            await page.fill('input[name="password"]', PASSWORD_TSI)
+            await page.click('button[type="submit"], input[type="submit"]')
+            await page.wait_for_timeout(3000)
 
-            if res.status_code == 200:
-                log_results.append(f"✅ [{idx}/{len(lines)}] {kode_roll}: Sukses")
-            else:
-                log_results.append(f"⚠️ [{idx}/{len(lines)}] {kode_roll}: Gagal HTTP {res.status_code}")
+            # 2. Eksekusi transfer di dalam konteks browser yang tersesi
+            for idx, line in enumerate(lines, 1):
+                parts = [p.strip().upper() for p in line.split(",") if p.strip()]
+                if not parts:
+                    continue
+
+                kode_roll = parts[0]
+                sloc_asal = parts[1] if len(parts) > 1 else "GFGD"
+                sloc_tujuan = parts[2] if len(parts) > 2 else "GFGL"
+                bin_tujuan = parts[3] if len(parts) > 3 else ""
+
+                # Kirim request transaksi langsung dari dalam konteks JS browser
+                js_script = f"""
+                    async () => {{
+                        await fetch('{BASE_URL}/brctsloc');
+                        
+                        const payload = new URLSearchParams();
+                        payload.append('batch', '{kode_roll}');
+                        payload.append('slocs', '{sloc_asal}');
+                        payload.append('slocr', '{sloc_tujuan}');
+                        payload.append('datscan', '{today}');
+                        payload.append('bin', '{bin_tujuan}');
+                        payload.append('note', '');
+
+                        await fetch('{BASE_URL}/ttranslist/save_scan', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }},
+                            body: payload
+                        }});
+
+                        const resPost = await fetch('{BASE_URL}/ttranslist/save_post', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }},
+                            body: payload
+                        }});
+
+                        return resPost.status;
+                    }}
+                """
+                
+                status_code = await page.evaluate(js_script)
+
+                if status_code == 200:
+                    log_results.append(f"✅ [{idx}/{len(lines)}] {kode_roll}: Sukses")
+                else:
+                    log_results.append(f"⚠️ [{idx}/{len(lines)}] {kode_roll}: Gagal HTTP {status_code}")
+
         except Exception as e:
-            log_results.append(f"💥 [{idx}/{len(lines)}] {kode_roll}: Error ({str(e)})")
+            log_results.append(f"💥 Error Browser: {str(e)}")
+        finally:
+            await browser.close()
 
     final_report = "🎉 **Proses Pemindahan Selesai!**\n\n" + "\n".join(log_results)
     await status_msg.edit_text(final_report, parse_mode="Markdown")
 
 if __name__ == "__main__":
-    # Jalankan server dummy di latar belakang untuk Render Free Tier
     threading.Thread(target=run_health_server, daemon=True).start()
     
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
