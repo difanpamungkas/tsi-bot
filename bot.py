@@ -54,7 +54,7 @@ async def process_tsi(roll_data: str) -> str:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
         try:
-            # 1. ALUR AUTO-LOGIN
+            # 1. PROSES LOGIN KE WEB TSI
             await page.goto(f"{BASE_URL}/login", wait_until="networkidle")
             
             user_input = page.locator("input[name*='user' i], input[name*='email' i], input[id*='user' i]").first
@@ -69,14 +69,52 @@ async def process_tsi(roll_data: str) -> str:
                     await submit_btn.click()
                     await page.wait_for_load_state("networkidle")
 
-            # 2. Buka Halaman Transaksi
+            # 2. MASUK KE HALAMAN SLOC
             await page.goto(f"{BASE_URL}/brctsloc", wait_until="networkidle")
             
             if "login" in page.url.lower():
                 await browser.close()
-                return "❌ **Gagal Login TSI Raw!** Periksa kombinasi Username/Password TSI."
+                return "❌ **Gagal Login TSI Raw!** Username atau Password ditolak server."
 
-            # 3. Eksekusi Roll
+            # 3. EKSEKUSI API DALAM KONTEKS BROWSER (NATIVE FETCH)
+            js_fetch_script = """
+            async ([batch, slocs, slocr, binCode, todayStr]) => {
+                const postData = new URLSearchParams({
+                    'batch': batch,
+                    'slocs': slocs,
+                    'slocr': slocr,
+                    'datscan': todayStr,
+                    'bin': binCode,
+                    'note': ''
+                });
+
+                await fetch('/ttranslist/save_scan', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: postData
+                });
+
+                const resPost = await fetch('/ttranslist/save_post', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: postData
+                });
+
+                const text = await resPost.text();
+                try {
+                    return JSON.parse(text);
+                } catch(e) {
+                    return { status: false, message: text };
+                }
+            }
+            """
+
             for line in lines:
                 parts = [p.strip() for p in line.split(',') if p.strip()]
                 if not parts:
@@ -97,54 +135,22 @@ async def process_tsi(roll_data: str) -> str:
 
                 if not sender_sloc:
                     sender_sloc = "GFGD"
-                    stock_res = await page.request.post(
-                        f"{BASE_URL}/rstock/get_stock",
-                        form={"mat": "", "sloc": "", "batch": batch_code, "cust": "", "refr": "", "shift": ""},
-                        headers={"X-Requested-With": "XMLHttpRequest"}
-                    )
-                    if stock_res.ok:
-                        try:
-                            st_json = await stock_res.json()
-                            if isinstance(st_json, list) and len(st_json) > 0:
-                                sender_sloc = normalize_sloc(st_json[0].get("SLOC", "GFGD"))
-                        except Exception:
-                            pass
 
                 if not receiver_sloc:
                     receiver_sloc = "GFGL" if sender_sloc == "GFGD" else "GFGD"
 
-                post_payload = {
-                    "batch": batch_code,
-                    "slocs": sender_sloc,
-                    "slocr": receiver_sloc,
-                    "datscan": today_str,
-                    "bin": clean_bin,
-                    "note": ""
-                }
+                # Jalankan fetch langsung dari window browser yang sudah ter-login
+                res_json = await page.evaluate(
+                    js_fetch_script, 
+                    [batch_code, sender_sloc, receiver_sloc, clean_bin, today_str]
+                )
 
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "X-Requested-With": "XMLHttpRequest"
-                }
-
-                # Exec API Save Scan & Save Post
-                await page.request.post(f"{BASE_URL}/ttranslist/save_scan", form=post_payload, headers=headers)
-                post_res = await page.request.post(f"{BASE_URL}/ttranslist/save_post", form=post_payload, headers=headers)
-
-                res_text = await post_res.text()
-                
-                if post_res.ok:
-                    try:
-                        res_json = json.loads(res_text)
-                        msg = str(res_json.get("message", res_text)).strip()
-                        if "berhasil" in msg.lower() or "ok" in msg.lower() or res_json.get("status") is True:
-                            results.append(f"✅ `{batch_code}`: {sender_sloc} ➔ {receiver_sloc}")
-                        else:
-                            results.append(f"❌ `{batch_code}`: `{msg}`")
-                    except Exception:
-                        results.append(f"⚠️ `{batch_code}`: Respon TSI: `{res_text[:100]}`")
+                msg = str(res_json.get("message", "")).strip()
+                if "berhasil" in msg.lower() or "ok" in msg.lower() or res_json.get("status") is True:
+                    bin_info = f" (Bin: `{clean_bin}`)" if clean_bin else ""
+                    results.append(f"✅ `{batch_code}`: {sender_sloc} ➔ {receiver_sloc}{bin_info}")
                 else:
-                    results.append(f"❌ `{batch_code}`: HTTP Error {post_res.status}")
+                    results.append(f"❌ `{batch_code}`: `{msg[:120]}`")
 
                 await asyncio.sleep(0.5)
 
