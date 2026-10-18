@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 
 # Token Bot Telegram milikmu
-TOKEN = "8839466878:AAETekpgfiY-V7eSttUUlVh8O3pF3youOCE"
+TOKEN = "8839466878:AAGDgqk3bcKkjo4FCg4RV28qLgFXv3zTwyk"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
