@@ -12,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-TOKEN = "8839466878:AAETekpgfiY-V7eSttUUlVh8O3pF3youOCE"
+TOKEN = "8839466878:AAGDgqk3bcKkjo4FCg4RV28qLgFXv3zTwyk"
 BASE_URL = "https://tsiraw.tsindustri.com"
 
 def normalize_sloc(val: str) -> str:
