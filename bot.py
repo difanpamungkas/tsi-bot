@@ -12,9 +12,13 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Token Bot Telegram Baru
+# Configuration
 TOKEN = "8839466878:AAGDgqk3bcKkjo4FCg4RV28qLgFXv3zTwyk"
 BASE_URL = "https://tsiraw.tsindustri.com"
+
+# ISI AKUN TSI KAMU DI SINI
+TSI_USERNAME = "Ppic06"
+TSI_PASSWORD = "rio234"
 
 SLOC_KEYWORDS = ['GFGD', 'GFGL', 'PROD', 'DALAM', 'LUAR', 'PRODUKSI']
 
@@ -62,8 +66,27 @@ async def process_tsi(roll_data: str) -> str:
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
         try:
+            # 1. ALUR AUTO-LOGIN
+            await page.goto(f"{BASE_URL}/login", wait_until="networkidle")
+            
+            # Cek jika ada form login
+            user_input = page.locator("input[name*='user' i], input[name*='email' i], input[id*='user' i]").first
+            pass_input = page.locator("input[type='password']").first
+            
+            if await user_input.count() > 0 and await pass_input.count() > 0:
+                await user_input.fill(TSI_USERNAME)
+                await pass_input.fill(TSI_PASSWORD)
+                
+                # Klik tombol submit login
+                submit_btn = page.locator("button[type='submit'], input[type='submit'], .btn-primary").first
+                if await submit_btn.count() > 0:
+                    await submit_btn.click()
+                    await page.wait_for_load_state("networkidle")
+            
+            # 2. Buka Halaman Sloc untuk Memastikan Session Aktif
             await page.goto(f"{BASE_URL}/brctsloc", wait_until="networkidle")
 
+            # 3. Eksekusi Request API Menggunakan Session Login Terautentikasi
             for line in lines:
                 parts = [p.strip() for p in line.split(',') if p.strip()]
                 if not parts:
@@ -89,17 +112,14 @@ async def process_tsi(roll_data: str) -> str:
                 elif len(parts) == 2:
                     receiver_sloc = normalize_sloc(parts[1])
 
+                # Ambil posisi stok saat ini jika Sloc Asal tidak diisi
                 if not sender_sloc:
                     current_sloc = "GFGD"
                     stock_res = await page.request.post(
                         f"{BASE_URL}/rstock/get_stock",
                         form={
-                            "mat": "",
-                            "sloc": "",
-                            "batch": batch_code,
-                            "cust": "",
-                            "refr": "",
-                            "shift": ""
+                            "mat": "", "sloc": "", "batch": batch_code,
+                            "cust": "", "refr": "", "shift": ""
                         },
                         headers={"X-Requested-With": "XMLHttpRequest"}
                     )
@@ -134,17 +154,9 @@ async def process_tsi(roll_data: str) -> str:
                     "X-Requested-With": "XMLHttpRequest"
                 }
 
-                await page.request.post(
-                    f"{BASE_URL}/ttranslist/save_scan",
-                    form=post_payload,
-                    headers=headers
-                )
-
-                post_res = await page.request.post(
-                    f"{BASE_URL}/ttranslist/save_post",
-                    form=post_payload,
-                    headers=headers
-                )
+                # Kirim API Save Scan & Save Post dengan cookie terautentikasi
+                await page.request.post(f"{BASE_URL}/ttranslist/save_scan", form=post_payload, headers=headers)
+                post_res = await page.request.post(f"{BASE_URL}/ttranslist/save_post", form=post_payload, headers=headers)
 
                 if post_res.ok:
                     try:
@@ -175,10 +187,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **Bot TSI Raw Workstation Active!**\n\n"
         "Kirim daftar roll untuk memindahkan Sloc.\n\n"
         "**Format Pesan:**\n"
-        "• `KODE_ROLL` (Auto Swap Sloc)\n"
         "• `KODE_ROLL, TARGET_SLOC` (Contoh: `GI123, GFGL`)\n"
-        "• `KODE_ROLL, SLOC_ASAL, SLOC_TUJUAN` (Contoh: `GI123, GFGL, GFGD`)\n"
-        "• `KODE_ROLL, SLOC_ASAL, SLOC_TUJUAN, BIN` (Contoh: `GI123, GFGL, GFGD, A01-02`)"
+        "• `KODE_ROLL, SLOC_ASAL, SLOC_TUJUAN` (Contoh: `GI123, GFGL, GFGD`)"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -188,7 +198,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
-    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll ke server TSI Raw...")
+    status_msg = await update.message.reply_text(f"⏳ Memproses {len(lines)} roll di VPS...")
     
     result = await process_tsi(text)
     await status_msg.edit_text(result, parse_mode="Markdown")
@@ -199,7 +209,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Silakan upload file dengan format `.txt`!")
         return
         
-    status_msg = await update.message.reply_text("⏳ Mengunduh file & memproses pemindahan Sloc...")
+    status_msg = await update.message.reply_text("⏳ Memproses file roll...")
     
     file = await context.bot.get_file(doc.file_id)
     file_bytes = await file.download_as_bytearray()
