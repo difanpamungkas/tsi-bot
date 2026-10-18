@@ -11,8 +11,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Masukkan Bot Token Telegram kamu di sini (atau via environment variable BOT_TOKEN)
-TOKEN = os.getenv("BOT_TOKEN", "ISI_BOT_TOKEN_TELEGRAM_KAMU_DI_SINI")
+# Token Bot Telegram milikmu
+TOKEN = "8839466878:AAETekpgfiY-V7eSttUUlVh8O3pF3youOCE"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
@@ -46,12 +46,8 @@ async def process_tsi(roll_data: str) -> str:
         page.set_default_timeout(60000)  # Timeout 60 detik agar tidak rentan freeze
 
         try:
-            # === TEMPAT LOGIKA PROSES / USERSCRIPT TSI RAW ===
-            # Contoh eksekusi halaman & transfer:
-            # await page.goto("https://tsi-raw-website.com")
-            # await page.evaluate(...) # Jalankan logika Userscript v12.0.6
-            
-            await asyncio.sleep(2)  # Simulasi proses pemindahan
+            # === LOGIKA PROSES / USERSCRIPT TSI RAW ===
+            await asyncio.sleep(2)  # Simulasi pemrosesan
             await browser.close()
             
             lines = [line.strip() for line in roll_data.strip().split('\n') if line.strip()]
