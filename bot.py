@@ -4,7 +4,8 @@ import logging
 import datetime
 import json
 import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import io
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from playwright.async_api import async_playwright
 
@@ -16,11 +17,12 @@ logging.basicConfig(
 TOKEN = "8839466878:AAGDgqk3bcKkjo4FCg4RV28qLgFXv3zTwyk"
 BASE_URL = "https://tsiraw.tsindustri.com"
 
+# KREDENSIAL AKUN TSI RAW
 TSI_USERNAME = "Ppic06"
 TSI_PASSWORD = "rio234"
 
 # ====================================================
-# 1. LOGIKA UTAMA & HELPER DARI SCRIPT V12.0.6
+# 1. STRUKTUR & HELPER LOGIKA UTAMA SCRIPT V12.0.6
 # ====================================================
 
 def normalize_sloc_name(val):
@@ -57,25 +59,25 @@ def extract_bin_code(item):
     val = str(val).strip()
     return val if val and val.lower() not in ['nan', 'null', 'undefined'] else '-'
 
-# Memory & State Pengguna
+# Memory / Config State Pengguna
 USER_CONFIGS = {}
 
 def get_user_cfg(user_id):
     if user_id not in USER_CONFIGS:
         USER_CONFIGS[user_id] = {
-            "mode_type": "API_DIRECT",      # API_DIRECT, HIDDEN_NATIVE
+            "mode_type": "API_DIRECT",      # API_DIRECT, HIDDEN_NATIVE, UI_INJECT
             "sloc_rule": "AUTO_SWAP",       # AUTO_SWAP, GFGD_TO_GFGL, GFGL_TO_GFGD, MANUAL
-            "sloc_sender": "GFGD",          # Kalo MANUAL
-            "sloc_receiver": "GFGL",        # Kalo MANUAL
+            "sloc_sender": "GFGD",          # Kasus Manual
+            "sloc_receiver": "GFGL",        # Kasus Manual
             "bin_rule": "INTERIM",          # INTERIM, ORIGINAL, EMPTY, MANUAL
             "custom_bin": "",
             "notepad_text": "",
-            "saved_batches": []             # Memori pindaian
+            "saved_batches": []             # Memori Pindaian
         }
     return USER_CONFIGS[user_id]
 
 # ====================================================
-# 2. KEYBOARD INTERAKTIF TELEGRAM
+# 2. NAVIGASI TOMBOL (INLINE KEYBOARD)
 # ====================================================
 
 def build_main_keyboard():
@@ -85,7 +87,7 @@ def build_main_keyboard():
             InlineKeyboardButton("⚡ Cek Real-Time", callback_data="btn_check_stock")
         ],
         [
-            InlineKeyboardButton("⚙️ Mode & Aturan Sloc", callback_data="menu_sloc_rules"),
+            InlineKeyboardButton("🔄 Aturan Sloc", callback_data="menu_sloc_rules"),
             InlineKeyboardButton("📦 Aturan Bin Fallback", callback_data="menu_bin_rules")
         ],
         [
@@ -93,20 +95,22 @@ def build_main_keyboard():
             InlineKeyboardButton("💾 Memori Pindaian", callback_data="menu_memory")
         ],
         [
-            InlineKeyboardButton("📜 Status Config v12.0.6", callback_data="menu_status_info")
+            InlineKeyboardButton("🧹 Bersihkan Input Notepad", callback_data="btn_clear_input")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # ====================================================
-# 3. ENGINE EXECUTION PLAYWRIGHT (FETCH V12.0.6)
+# 3. ENGINE EXECUTION VIA PLAYWRIGHT (NATIVE V12.0.6)
 # ====================================================
 
-async def execute_v12_logic(user_id, raw_input_text):
+async def run_v12_engine(user_id, action_type):
     cfg = get_user_cfg(user_id)
-    lines = [line.strip() for line in raw_input_text.strip().split('\n') if line.strip()]
-    if not lines:
-        return "⚠️ Tidak ada daftar roll di dalam input!"
+    input_text = cfg["notepad_text"] if cfg["notepad_text"].strip() else "\n".join(cfg["saved_batches"])
+    lines = [line.strip() for line in input_text.strip().split('\n') if line.strip()]
+
+    if not lines and action_type != "CHECK_STOCK":
+        return "⚠️ Tidak ada daftar roll di dalam Notepad atau Memori pindaian!", None
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -119,11 +123,10 @@ async def execute_v12_logic(user_id, raw_input_text):
         page = await context.new_page()
         page.set_default_timeout(60000)
 
-        logs = []
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
         try:
-            # Login
+            # 1. Login Sesi Ke TSI Raw
             await page.goto(f"{BASE_URL}/login", wait_until="networkidle")
             user_input = page.locator("input[name*='user' i], input[name*='email' i], input[id*='user' i]").first
             pass_input = page.locator("input[type='password']").first
@@ -138,11 +141,12 @@ async def execute_v12_logic(user_id, raw_input_text):
 
             await page.goto(f"{BASE_URL}/brctsloc", wait_until="networkidle")
 
-            # Script JS Native Fetch v12.0.6
+            # 2. Skrip JS Native Fetch v12.0.6 (Dijalankan Langsung Di Browser VPS)
             js_engine = """
-            async ([lines, slocRule, binRule, customBin, senderManual, receiverManual, todayStr]) => {
+            async ([lines, actionType, slocRule, binRule, customBin, senderManual, receiverManual, todayStr]) => {
                 const results = [];
-                
+                const csvData = [];
+
                 function normalizeSloc(val) {
                     if (!val) return 'GFGD';
                     const clean = val.toString().toUpperCase().trim();
@@ -165,12 +169,10 @@ async def execute_v12_logic(user_id, raw_input_text):
                     if (!line.trim()) continue;
                     const parts = line.split(/[,;\\s]+/).map(p => p.trim()).filter(Boolean);
                     const code = parts[0] ? parts[0].toUpperCase() : '';
-
                     if (!code) continue;
 
-                    // 1. Fetch Single Stock
-                    let currentSloc = 'GFGD';
-                    let originalBin = '-';
+                    // Fetch Stok Awal
+                    let stockItem = null;
                     try {
                         const resStock = await fetch('/rstock/get_stock', {
                             method: 'POST',
@@ -179,10 +181,28 @@ async def execute_v12_logic(user_id, raw_input_text):
                         });
                         const stockData = await resStock.json();
                         if (Array.isArray(stockData) && stockData.length > 0) {
-                            currentSloc = stockData[0].SLOC || 'GFGD';
-                            originalBin = extractBin(stockData[0]);
+                            stockItem = stockData[0];
                         }
                     } catch(e) {}
+
+                    // Jika Hanya Cek Stok Real-Time
+                    if (actionType === 'CHECK_STOCK') {
+                        if (stockItem) {
+                            const sloc = stockItem.SLOC || 'N/A';
+                            const bin = extractBin(stockItem);
+                            const grade = stockItem.GRADE || '-';
+                            const meter = stockItem.LENGTH || stockItem.LENGTH_M || '0';
+                            const matName = stockItem.NAME || stockItem.MATERIAL || '-';
+                            results.push(`• **${code}** | Grd: \`${grade}\` | Sloc: \`${sloc}\` | Bin: \`${bin}\` | Qty: \`${meter}m\`\n📦 \`${matName}\``);
+                        } else {
+                            results.push(`⚠️ **${code}**: Tidak ditemukan di stok aktif`);
+                        }
+                        continue;
+                    }
+
+                    // Penentuan Logika Sloc & Bin Fallback v12.0.6
+                    let currentSloc = stockItem ? (stockItem.SLOC || 'GFGD') : 'GFGD';
+                    let originalBin = stockItem ? extractBin(stockItem) : '-';
 
                     let senderText = normalizeSloc(currentSloc);
                     let receiverText = '';
@@ -210,7 +230,26 @@ async def execute_v12_logic(user_id, raw_input_text):
                         else if (binRule === 'MANUAL') { targetBin = customBin.toUpperCase(); }
                     }
 
-                    // 2. Direct API Transfer v12.0.6
+                    // Export CSV
+                    if (actionType === 'EXPORT_CSV') {
+                        if (stockItem) {
+                            csvData.push([
+                                stockItem.BATCH || code,
+                                (stockItem.MATERIAL || stockItem.NAME || '-').replace(/,/g, ' '),
+                                (stockItem.SLOC || '-').replace(/,/g, ' '),
+                                extractBin(stockItem).replace(/,/g, ' '),
+                                stockItem.LENGTH || stockItem.LENGTH_M || '0',
+                                stockItem.WEIGHT || stockItem.WEIGHTN || '0',
+                                stockItem.GRADE || '-',
+                                (stockItem.CUST || stockItem.CUSTOMER || '-').replace(/,/g, ' ')
+                            ].join(','));
+                        } else {
+                            csvData.push([code, 'TIDAK_DITEMUKAN', '-', '-', '0', '0', '-', '-'].join(','));
+                        }
+                        continue;
+                    }
+
+                    // Eksekusi API Direct v12.0.6 (/ttranslist/save_scan & /ttranslist/save_post)
                     const postData = new URLSearchParams({
                         'batch': code,
                         'slocs': senderText,
@@ -244,24 +283,31 @@ async def execute_v12_logic(user_id, raw_input_text):
                     }
                 }
 
-                return results;
+                return { results, csvData };
             }
             """
 
-            exec_results = await page.evaluate(
+            exec_out = await page.evaluate(
                 js_engine,
-                [lines, cfg["sloc_rule"], cfg["bin_rule"], cfg["custom_bin"], cfg["sloc_sender"], cfg["sloc_receiver"], today_str]
+                [lines, action_type, cfg["sloc_rule"], cfg["bin_rule"], cfg["custom_bin"], cfg["sloc_sender"], cfg["sloc_receiver"], today_str]
             )
 
             await browser.close()
-            return "🎉 **Hasil Smart Queue v12.0.6:**\n\n" + "\n".join(exec_results)
+
+            if action_type == "EXPORT_CSV":
+                header = ["BATCH,MATERIAL,SLOC,BIN,QTY_METER,WEIGHT_KG,GRADE,CUSTOMER"]
+                full_csv = "\n".join(header + exec_out.get("csvData", []))
+                return "📊 **Ekspor CSV Berhasil!**", full_csv
+
+            header_title = "⚡ **Hasil Cek Real-Time Stok:**\n\n" if action_type == "CHECK_STOCK" else "🎉 **Hasil Smart Queue v12.0.6:**\n\n"
+            return header_title + "\n".join(exec_out.get("results", [])), None
 
         except Exception as e:
             await browser.close()
-            return f"❌ Terjadi kesalahan di VPS: {str(e)}"
+            return f"❌ Terjadi kesalahan di VPS: {str(e)}", None
 
 # ====================================================
-# 4. HANDLER COMMAND & BOT HANDLER
+# 4. BOT EVENT & CALLBACK HANDLER TELEGRAM
 # ====================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -272,11 +318,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💀 **TSI RAW WORKSTATION BOT (v12.0.6)**\n"
         "━━━━━━━ CONFIG SYSTEM ━━━━━━━\n"
         f"• **Akun TSI**: `{TSI_USERNAME}`\n"
-        f"• **Mode Transfer**: `{cfg['mode_type']}`\n"
         f"• **Aturan Sloc**: `{cfg['sloc_rule']}`\n"
         f"• **Aturan Bin**: `{cfg['bin_rule']}`\n"
         f"• **Memori Tersimpan**: `{len(cfg['saved_batches'])} Roll`\n\n"
-        "Silakan pilih menu atau langsung kirim daftar roll ke bot:"
+        "Silakan pilih menu di bawah ini atau langsung kirimkan daftar roll ke chat:"
     )
 
     if update.message:
@@ -291,18 +336,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_user_cfg(user_id)
 
     if query.data == "btn_run_queue":
-        if not cfg["notepad_text"].strip() and len(cfg["saved_batches"]) == 0:
-            text = "⚠️ **Notepad & Memori Kosong!**\nKirimkan daftar roll via pesan teks terlebih dahulu."
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali", callback_data="main_menu")]])
-            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
-            return
-
-        input_data = cfg["notepad_text"] if cfg["notepad_text"].strip() else "\n".join(cfg["saved_batches"])
-        await query.edit_message_text("⏳ **Menjalankan Smart Queue Auto-Input v12.0.6 di VPS...**", parse_mode="Markdown")
-        
-        result_str = await execute_v12_logic(user_id, input_data)
+        await query.edit_message_text("⏳ **Menjalankan Smart Queue Auto-Input v12.0.6...**", parse_mode="Markdown")
+        res_text, _ = await run_v12_engine(user_id, "QUEUE_TRANSFER")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]])
-        await context.bot.send_message(chat_id=user_id, text=result_str, parse_mode="Markdown", reply_markup=kb)
+        await context.bot.send_message(chat_id=user_id, text=res_text, parse_mode="Markdown", reply_markup=kb)
+
+    elif query.data == "btn_check_stock":
+        await query.edit_message_text("⏳ **Mengecek Real-Time Stok Server TSI...**", parse_mode="Markdown")
+        res_text, _ = await run_v12_engine(user_id, "CHECK_STOCK")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]])
+        await context.bot.send_message(chat_id=user_id, text=res_text, parse_mode="Markdown", reply_markup=kb)
+
+    elif query.data == "btn_export_csv":
+        await query.edit_message_text("⏳ **Membuat File CSV TSIRaw Export...**", parse_mode="Markdown")
+        res_text, csv_content = await run_v12_engine(user_id, "EXPORT_CSV")
+        if csv_content:
+            file_bytes = io.BytesIO(csv_content.encode('utf-8'))
+            file_bytes.name = f"Rekap_TSIRaw_{datetime.date.today().strftime('%Y%m%d')}.csv"
+            await context.bot.send_document(chat_id=user_id, document=InputFile(file_bytes), caption="✔ File Rekap CSV Excel Siap!")
+        else:
+            await context.bot.send_message(chat_id=user_id, text=res_text, parse_mode="Markdown")
 
     elif query.data == "menu_sloc_rules":
         kb = InlineKeyboardMarkup([
@@ -347,6 +400,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg["saved_batches"] = []
         await start(update, context)
 
+    elif query.data == "btn_clear_input":
+        cfg["notepad_text"] = ""
+        await query.edit_message_text("🧹 **Notepad Berhasil Dibersihkan!**", parse_mode="Markdown")
+        await asyncio.sleep(1)
+        await start(update, context)
+
     elif query.data == "main_menu":
         await start(update, context)
 
@@ -359,16 +418,14 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_user_cfg(user_id)
     cfg["notepad_text"] = text
 
-    # Ekstraksi otomatis kode roll ke memori
     lines = text.strip().split('\n')
     for line in lines:
         code = line.split(',')[0].strip().upper()
         if is_tsi_raw_barcode(code) and code not in cfg["saved_batches"]:
             cfg["saved_batches"].append(code)
 
-    status_msg = await update.message.reply_text(
-        f"📝 **{len(lines)} Baris Diterima ke Notepad!**\n"
-        f"Gunakan menu di bawah untuk mulai memproses:",
+    await update.message.reply_text(
+        f"📝 **{len(lines)} Baris Diterima ke Notepad!**\nPilih tindakan melalui menu tombol di bawah:",
         parse_mode="Markdown",
         reply_markup=build_main_keyboard()
     )
